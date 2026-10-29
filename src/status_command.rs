@@ -155,9 +155,7 @@ pub async fn workspace_status(
     )
     .await;
     for id in enabled {
-        let Ok(identity) = pms.identity(&id).await else {
-            continue;
-        };
+        let identity = pms.identity(&id);
         if shown.contains(&identity) {
             continue;
         }

@@ -147,10 +147,10 @@ impl<'a> Names<'a> {
 
     /// Whether `name` names `id`, as spelled or under `id`'s package
     /// manager's canonical form. Only a name spelled another way asks it.
-    async fn same(&self, id: &PackageId, name: &str) -> bool {
-        id.name == name
-            || self.pms.canonical_name(&id.pm, &id.name).await
-                == self.pms.canonical_name(&id.pm, name).await
+    async fn same(&self, id: &PackageId, name: &str) -> Result<bool> {
+        Ok(id.name == name
+            || self.pms.canonical_name(&id.pm, &id.name).await?
+                == self.pms.canonical_name(&id.pm, name).await?)
     }
 
     /// The packages `name` could mean from the nearest of the registry
@@ -169,7 +169,10 @@ impl<'a> Names<'a> {
         let mut found: Vec<PackageId> = Vec::new();
         for id in ids {
             let seen = found.iter().any(|f| f.pm == id.pm);
-            if !seen && pm.is_none_or(|pm| id.pm == pm) && self.same(id, name).await {
+            if !seen
+                && pm.is_none_or(|pm| id.pm == pm)
+                && self.same(id, name).await.unwrap_or(false)
+            {
                 found.push(id.clone());
             }
         }
@@ -200,9 +203,12 @@ impl<'a> Names<'a> {
             if entry.name != "*"
                 && entry.name != id.name
                 && entry.pm.as_ref().is_none_or(|pm| *pm == id.pm)
-                && self.same(id, &entry.name).await
             {
-                spellings.add(entry.clone(), id.clone());
+                match self.same(id, &entry.name).await {
+                    Ok(true) => spellings.add(entry.clone(), id.clone()),
+                    Ok(false) => {}
+                    Err(_) => spellings.mark_uncertain(entry.clone(), id.clone()),
+                }
             }
         }
     }
@@ -454,9 +460,8 @@ pub async fn pending_candidates(sym: &Symposium, deps: &Arc<Workspace>) -> Vec<P
 }
 
 /// Record consent decisions: approvals into `[plugins] auto-enable`,
-/// declines into `[plugins] disable`, then save the config. Decisions retain
-/// the discovered package's owner so deduplication uses that PM's name rules;
-/// the config stores the package name.
+/// declines into `[plugins] disable`, then save the config. Decisions use the
+/// canonical package identities returned by discovery.
 ///
 /// Split out from the prompt so the decision recording is testable without a
 /// terminal, and so other entry points can record the same way.
@@ -575,7 +580,7 @@ pub async fn prompt_for_consent(
             None => break, // Esc — leave the rest undecided
         }
     }
-    apply_consent(sym, deps.pms(), &approved, &declined).await
+    apply_consent(sym, &approved, &declined)
 }
 
 /// A short human summary of what a discovered plugin contributes, for the
