@@ -1,9 +1,9 @@
 //! Grading: a trusted copy of the task holding only the submission's editable files, then
 //! the code checks (RFD reference, "Grading the code").
 //!
-//! Invariant: only repository-owned code runs outside the `srt` backend. Today that means
-//! `--check-tasks` grades each task's `solution/` with [`process::Local`]; an agent's
-//! submission is graded once grading runs through `srt`.
+//! Invariant: only repository-owned code runs outside the `srt` backend. `--check-tasks`
+//! grades each task's `solution/` with [`process::Local`]; an agent's submission is
+//! graded through `srt`, under the trial's grading policy (`run::grading`).
 
 mod cargo;
 mod error;
@@ -17,7 +17,8 @@ mod solution;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub(crate) use error::{GradeError, ImportError, ListingProblem, ProcessError, with_causes};
@@ -28,7 +29,8 @@ use crate::evals::Evals;
 use crate::task::{CheckName, Task};
 use cargo::{Cargo, StarterTargets};
 use import::{GradingCopy, import_submission};
-use limits::{Budget, GradeLimits};
+use limits::Budget;
+pub(crate) use limits::GradeLimits;
 use process::{Backend, Finished, Invocation};
 
 /// What grading concluded about one submission.
@@ -152,17 +154,39 @@ impl fmt::Display for Step {
     }
 }
 
-/// Grades `submission` against `task`, running commands through `backend` and writing
-/// their output to log files in `logs`.
+/// Where one grading puts its trusted copy, the commands' writable state, and their logs,
+/// each a directory a sandbox's policy can name.
+#[derive(Debug, Clone)]
+pub(crate) struct GradingDirs {
+    /// The project and fixtures; must not exist yet.
+    pub(crate) sources: PathBuf,
+    /// Emptied before each step.
+    pub(crate) work: PathBuf,
+    pub(crate) logs: PathBuf,
+}
+
+impl GradingDirs {
+    /// Everything under `dir`, for grading repository-owned code without `srt`.
+    pub(crate) fn under(dir: &Path) -> Self {
+        Self {
+            sources: dir.join("sources"),
+            work: dir.join("work"),
+            logs: dir.join("logs"),
+        }
+    }
+}
+
+/// Grades `submission` against `task`, running commands through `backend`, with the
+/// copy and the commands' logs where `dirs` says.
 pub(crate) fn grade(
     evals: &Evals,
     task: &Task,
     submission: &Path,
     backend: &impl Backend,
     limits: &GradeLimits,
-    logs: &Path,
+    dirs: &GradingDirs,
 ) -> Grading {
-    match try_grade(evals, task, submission, backend, limits, logs) {
+    match try_grade(evals, task, submission, backend, limits, dirs) {
         Ok(report) => Grading::Graded(report),
         Err(GradeError::Import(error)) if error.invalidates_submission() => {
             Grading::InvalidSubmission(error)
@@ -177,21 +201,25 @@ fn try_grade(
     submission: &Path,
     backend: &impl Backend,
     limits: &GradeLimits,
-    logs: &Path,
+    dirs: &GradingDirs,
 ) -> Result<Report, GradeError> {
+    fs::create_dir_all(&dirs.logs).map_err(|source| ImportError::Write {
+        path: dirs.logs.clone(),
+        source,
+    })?;
     let mut commands = Commands {
         backend,
         budget: Budget::new(limits.commands),
-        logs,
+        logs: &dirs.logs,
     };
-    let prepared = prepare(evals, task, &mut commands, limits)?;
+    let prepared = prepare(evals, task, dirs, &mut commands, limits)?;
     let outside_editable = import_submission(
         &prepared.copy,
         task.editable(),
         &prepared.starter_owned,
         submission,
     )?;
-    let steps = run_steps(task, &prepared.cargo, &mut commands, limits)?;
+    let steps = run_steps(task, &prepared, &mut commands, limits)?;
     Ok(Report {
         outside_editable,
         steps,
@@ -211,11 +239,12 @@ struct Prepared {
 fn prepare(
     evals: &Evals,
     task: &Task,
+    dirs: &GradingDirs,
     commands: &mut Commands<'_, impl Backend>,
     limits: &GradeLimits,
 ) -> Result<Prepared, GradeError> {
-    let copy = GradingCopy::from_trusted(evals, task)?;
-    let cargo = Cargo::new(copy.project(), copy.scratch());
+    let copy = GradingCopy::from_trusted(evals, task, &dirs.sources, &dirs.work)?;
+    let cargo = Cargo::new(copy.project(), copy.work());
     let starter = inspect_starter(&cargo, "metadata", &copy, commands, limits.metadata)?;
     place_checks(evals, task, &copy, &starter.tests)?;
     let placed = inspect_starter(&cargo, "metadata-checks", &copy, commands, limits.metadata)?;
@@ -262,10 +291,14 @@ fn starter_owned(build_scripts: BTreeSet<String>, checks: &[CheckName]) -> BTree
 /// failed.
 fn run_steps(
     task: &Task,
-    cargo: &Cargo,
+    prepared: &Prepared,
     commands: &mut Commands<'_, impl Backend>,
     limits: &GradeLimits,
 ) -> Result<Vec<Step>, GradeError> {
+    let (cargo, copy) = (&prepared.cargo, &prepared.copy);
+    // Each step starts from an empty `work/`: the submission's code runs in every step,
+    // and must leave nothing there for a later one.
+    copy.fresh_work()?;
     let build = run_step(StepKind::Build, &cargo.build(), commands, limits.build)?;
     let build_passed = build.outcome == Outcome::Passed;
     let mut later = vec![StepKind::TestLib];
@@ -275,6 +308,9 @@ fn run_steps(
     }
     let mut steps = vec![build];
     for kind in later {
+        if build_passed {
+            copy.fresh_work()?;
+        }
         steps.push(match kind {
             _ if !build_passed => Step {
                 kind,
@@ -458,7 +494,7 @@ mod tests {
             submission.path(),
             &Local,
             limits,
-            logs.path(),
+            &GradingDirs::under(logs.path()),
         ) {
             Grading::Graded(report) => report,
             other => panic!("expected a report, got {other:?}"),
@@ -622,7 +658,7 @@ mod tests {
             submission.path(),
             &Local,
             &GradeLimits::default(),
-            logs.path(),
+            &GradingDirs::under(logs.path()),
         )
     }
 
@@ -727,7 +763,7 @@ mod tests {
             submission.path(),
             &Local,
             &GradeLimits::default(),
-            logs.path(),
+            &GradingDirs::under(logs.path()),
         );
 
         assert!(
@@ -752,7 +788,7 @@ mod tests {
             submission.path(),
             &Local,
             &GradeLimits::default(),
-            logs.path(),
+            &GradingDirs::under(logs.path()),
         );
 
         assert!(
@@ -781,7 +817,7 @@ mod tests {
             submission.path(),
             &Local,
             &GradeLimits::default(),
-            logs.path(),
+            &GradingDirs::under(logs.path()),
         );
 
         // The real check calls `double`, which this submission lacks.
@@ -920,6 +956,7 @@ pub(crate) mod testing {
     /// A grading copy with a submission imported, and what it changed outside `editable`.
     #[derive(Debug)]
     pub(crate) struct Imported {
+        _dir: TempDir,
         pub(crate) copy: GradingCopy,
         edits: Vec<OutsideEdit>,
     }
@@ -990,9 +1027,15 @@ pub(crate) mod testing {
             submission: &Path,
             build_scripts: &BTreeSet<String>,
         ) -> Result<Imported, ImportError> {
-            let copy = GradingCopy::from_trusted(&self.evals, &self.task)?;
+            let dir = TempDir::new().unwrap();
+            let (sources, work) = (dir.path().join("sources"), dir.path().join("work"));
+            let copy = GradingCopy::from_trusted(&self.evals, &self.task, &sources, &work)?;
             let edits = import_submission(&copy, self.task.editable(), build_scripts, submission)?;
-            Ok(Imported { copy, edits })
+            Ok(Imported {
+                _dir: dir,
+                copy,
+                edits,
+            })
         }
     }
 
