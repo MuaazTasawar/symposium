@@ -289,7 +289,7 @@ impl Bench {
         configuration: Configuration,
         sandbox: &Scripted,
         runner: &Stub,
-    ) -> Result<PathBuf, TrialError> {
+    ) -> Result<Done, TrialError> {
         let key = api_key();
         let driver = Driver {
             batch: &self.batch,
@@ -305,7 +305,10 @@ impl Bench {
 
     /// The result of trial 1, which must have one.
     fn result(&self, configuration: Configuration, sandbox: &Scripted) -> Value {
-        let path = self.run(configuration, sandbox, &Stub::new()).unwrap();
+        let path = self
+            .run(configuration, sandbox, &Stub::new())
+            .unwrap()
+            .result();
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
@@ -391,6 +394,29 @@ fn a_failed_check_before_launch_stops_at_prelaunch() {
 }
 
 #[test]
+fn a_client_that_cannot_start_leaves_no_session_to_keep() {
+    let bench = Bench::new();
+    let done = bench
+        .run(
+            Configuration::Baseline,
+            &Scripted::new(Session::CannotStart),
+            &Stub::new(),
+        )
+        .unwrap();
+    let kept = bench
+        .trial_root(Configuration::Baseline)
+        .with_extension("kept");
+
+    done.retain(&kept).unwrap();
+
+    assert!(done.session.is_none(), "{done:?}");
+    for absent in ["transcript.jsonl", "stderr.log", "response.txt"] {
+        assert!(!kept.join(absent).exists(), "{absent}");
+    }
+    assert!(kept.join(RESULT_FILE).is_file());
+}
+
+#[test]
 fn a_client_that_cannot_start_is_kept_and_not_graded() {
     let bench = Bench::new();
 
@@ -472,7 +498,8 @@ fn the_result_names_the_client_and_model_the_runner_launched() {
             &Scripted::new(Session::CannotStart),
             &runner,
         )
-        .unwrap();
+        .unwrap()
+        .result();
 
     let result: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(result["client"]["name"], "codex", "{result:#}");
