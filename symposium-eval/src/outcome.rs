@@ -51,7 +51,8 @@ pub(crate) enum Failure {
 /// How far a trial got.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Session<'a> {
-    /// Setup or the pre-launch check failed, so the client was never started.
+    /// Setup or the pre-launch check failed, or the client could not be launched, so
+    /// it never started.
     NotStarted,
     /// The session ended, and its submission was graded.
     Graded {

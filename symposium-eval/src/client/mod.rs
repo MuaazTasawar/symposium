@@ -14,17 +14,21 @@ pub(crate) mod paths;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) use error::{ClientError, Malformation, ProvenanceError, TranscriptError, Unusable};
 
 use crate::grade::ProcessError;
 use crate::grade::process::{Backend, Finished, Invocation};
 use crate::run::Trial;
+use crate::run::client::Client;
 use crate::task::SkillName;
 
 /// One client, as the runner drives it.
 pub(crate) trait ClientRunner {
+    /// Which client this is, the only place a trial's client is named.
+    fn client(&self) -> Client;
+
     /// The command that starts a new session in `trial` and runs `prompt`, with `env` as
     /// its whole environment.
     fn invocation(&self, trial: &Trial, prompt: &str, env: Vec<(OsString, OsString)>)
@@ -306,6 +310,8 @@ pub(crate) struct Execution {
     /// client never started, and not evidence when the backend lost hold of the output.
     pub(crate) transcript: PathBuf,
     pub(crate) ended: Ended,
+    /// How long the backend ran the client, transcript reading left out.
+    pub(crate) elapsed: Duration,
     pub(crate) loads: Vec<Load>,
     pub(crate) hooks: HookEvidence,
     pub(crate) activity: ToolActivity,
@@ -354,15 +360,19 @@ pub(crate) fn execute(
     let invocation = runner.invocation(trial, prompt, env);
     let logs = trial.session();
     let transcript = invocation.log(&logs, "stdout");
+    let started = Instant::now();
+    let ran = backend.run(&invocation, deadline, &logs);
+    let elapsed = started.elapsed();
     let unread = |ended| Execution {
         transcript: transcript.clone(),
         ended,
+        elapsed,
         loads: vec![Load::Unknown; skills.len()],
         hooks: runner.unread_hooks(),
         activity: ToolActivity::unread(),
         summary: Summary::unread(runner.unread_usage()),
     };
-    let finished = match backend.run(&invocation, deadline, &logs) {
+    let finished = match ran {
         Ok(finished) => finished,
         Err(error @ ProcessError::Spawn { .. }) => return unread(Ended::NotLaunched(error)),
         // Every other error comes after the client started. Output the runner lost hold
@@ -399,6 +409,7 @@ pub(crate) fn execute(
     Execution {
         transcript,
         ended,
+        elapsed,
         loads: reading.loads,
         hooks: reading.hooks,
         activity: reading.activity,
@@ -434,6 +445,10 @@ mod tests {
     struct OneLine;
 
     impl ClientRunner for OneLine {
+        fn client(&self) -> Client {
+            Client::ClaudeCode
+        }
+
         fn invocation(
             &self,
             trial: &Trial,
@@ -600,6 +615,83 @@ mod tests {
         })
         .2
         .ended
+    }
+
+    /// Runs for its duration, then writes a finished transcript.
+    struct Slow(Duration);
+
+    impl Backend for Slow {
+        fn run(
+            &self,
+            invocation: &Invocation,
+            _: Duration,
+            logs: &Path,
+        ) -> Result<Finished, ProcessError> {
+            std::thread::sleep(self.0);
+            Replay {
+                transcript: "finished\n",
+                status: Some(0),
+                output_stayed_open: false,
+            }
+            .run(invocation, Duration::ZERO, logs)
+        }
+    }
+
+    /// [`OneLine`], taking its duration to read the transcript.
+    struct SlowReader(Duration);
+
+    impl ClientRunner for SlowReader {
+        fn client(&self) -> Client {
+            OneLine.client()
+        }
+
+        fn invocation(
+            &self,
+            trial: &Trial,
+            prompt: &str,
+            env: Vec<(OsString, OsString)>,
+        ) -> Invocation {
+            OneLine.invocation(trial, prompt, env)
+        }
+
+        fn unread_hooks(&self) -> HookEvidence {
+            OneLine.unread_hooks()
+        }
+
+        fn unread_usage(&self) -> Usage {
+            OneLine.unread_usage()
+        }
+
+        fn read(&self, trial: &Trial, transcript: &Path, skills: &[InstalledSkill]) -> Reading {
+            std::thread::sleep(self.0);
+            OneLine.read(trial, transcript, skills)
+        }
+    }
+
+    #[test]
+    fn a_sessions_time_is_the_clients_and_not_its_reading() {
+        let host = Host::new();
+        let trial = trial(&host.batch(), 1, Configuration::Baseline);
+        let (running, reading) = (Duration::from_millis(100), Duration::from_millis(100));
+
+        let started = Instant::now();
+        let execution = execute(
+            &SlowReader(reading),
+            &Slow(running),
+            &trial,
+            Vec::new(),
+            "do the task",
+            &[greeting()],
+            Duration::from_secs(60),
+        );
+        let total = started.elapsed();
+
+        assert!(matches!(execution.ended, Ended::Completed), "{execution:?}");
+        assert!(execution.elapsed >= running, "{:?}", execution.elapsed);
+        assert!(
+            total.saturating_sub(execution.elapsed) >= reading,
+            "{total:?}"
+        );
     }
 
     #[test]
