@@ -22,6 +22,7 @@ pub(crate) struct NewTrial<'a> {
 /// A trial whose preparation failed, with the root it keeps for its result.
 #[derive(Debug)]
 pub(crate) struct NotPrepared {
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     root: PathBuf,
     error: RunError,
 }
@@ -58,6 +59,7 @@ impl Batch {
     /// # Errors
     ///
     /// As [`Self::allocate_trial`] and [`NewTrial::prepare`].
+    #[cfg(test)]
     pub(crate) fn create_trial(
         &self,
         number: usize,
@@ -128,10 +130,12 @@ impl NewTrial<'_> {
 
 impl NotPrepared {
     /// The root the trial was allocated, where its result goes.
+    #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
+    #[cfg(test)]
     pub(crate) fn error(&self) -> &RunError {
         &self.error
     }

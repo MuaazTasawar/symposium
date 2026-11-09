@@ -106,6 +106,7 @@ pub(crate) struct SymposiumBuild {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum IsolationMode {
     Enforced,
+    #[expect(dead_code, reason = "--exploratory needs its own design")]
     Exploratory,
 }
 

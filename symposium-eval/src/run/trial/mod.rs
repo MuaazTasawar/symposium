@@ -67,6 +67,7 @@ pub(crate) struct SessionOutput {
 }
 
 impl Done {
+    #[cfg(test)]
     pub(crate) fn result(&self) -> PathBuf {
         self.root.join(RESULT_FILE)
     }
