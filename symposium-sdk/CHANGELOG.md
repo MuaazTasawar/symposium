@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/symposium-dev/symposium/compare/symposium-sdk-v0.1.1...symposium-sdk-v0.2.0) - 2026-11-09
+
+### Added
+
+- *(pm)* the cargo package manager is its own crate and its own binary
+- *(pm)* out-of-process package managers over newline-delimited JSON-RPC
+- [**breaking**] rename SYMPOSIUM.toml to Symposium.toml
+
+### Fixed
+
+- *(pm)* preserve remote identities and bound process lifetimes
+- *(plugin)* resolve a plugin's own script paths
+
+### Other
+
+- *(pm)* require remote name normalization
+- *(pm)* one `PackageManager` trait, in the SDK, whose operations fail
+- *(pm)* the workspace is the project package managers report
+
 ## [0.1.1](https://github.com/symposium-dev/symposium/compare/symposium-sdk-v0.1.0...symposium-sdk-v0.1.1) - 2026-10-01
 
 ### Other
