@@ -15,6 +15,8 @@ mod batch_name;
 mod claude;
 mod credential;
 pub(crate) mod host;
+#[cfg(all(test, target_os = "linux"))]
+mod real;
 mod report;
 mod symposium;
 
